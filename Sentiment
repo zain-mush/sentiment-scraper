@@ -1,0 +1,143 @@
+"""
+Initial Sentiment.py 
+
+@author: Zain Mushtaq 
+
+This script scrapes google news articles based on a keyword and gives them a sentiment score every month.
+"""
+
+import os
+import sys
+import time
+import nltk
+import requests
+import dateparser 
+import pandas as pd
+import http.client
+from gnews import GNews
+import requests
+from requests.exceptions import Timeout
+from bs4 import BeautifulSoup
+from GoogleNews import GoogleNews
+from datetime import datetime, timedelta
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+
+SEARCH_WORD = 'Matrox'                # Google news search input
+DELAY = 0.75                          # Delay between each request
+DAYS_TO_SCRAPE = 30                   # Days to scrape in the past. 
+SEARCHED_PAGES = 1                    # Pages to search for each SEARCH_PERIOD
+SEARCH_PERIOD = 30                    # Split DAYS_TO_SCRAPE into x days at a time
+FILENAME = 'news_monthly.csv'         # Change filename everyday as we change search parameters for each day
+EXCLUDE_WEBSITES = ['nasdaq.com', 'yahoo.com', 'finance.yahoo.com', 'bloomberg.com', 'fool.com', 'digitaljournal.com', 'glasgowwestend.today','www.hometown-pages.com']
+
+#nltk.download('vader_lexicon')
+
+def get_article_content(url):
+    try:
+        cleaned_url = url.split('&ved=')[0]
+
+        # Set User-Agent header to mimic a web browser
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+        }
+
+        # Use a session to handle cookies
+        with requests.Session() as session:
+            response = session.get(cleaned_url, headers=headers, timeout=5)
+            response.raise_for_status()
+
+            # Check for a 403 Forbidden status code
+            if response.status_code == 403:
+                print(f"Access to URL: {url} is forbidden. Skipping...")
+                return None
+
+            if response.status_code == 200:
+                time.sleep(DELAY)
+                soup = BeautifulSoup(response.content, 'html.parser')
+                article = soup.find('article')
+                if article is not None:
+                    return article.get_text().replace('\n', ' ')
+                else:
+                    return soup.get_text().replace('\n', ' ')
+            else:
+                return None
+    except Timeout:
+        print(f"Timeout occurred while accessing URL: {url}")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"Error occurred while accessing URL: {url} - {e}")
+        return None
+
+
+
+def data_scrape(startDATE, endDATE):
+    googlenews = GoogleNews(lang='en', start=startDATE, end=endDATE)
+    googlenews.search(SEARCH_WORD)
+    for page in range(1, SEARCHED_PAGES + 1):
+        googlenews.getpage(page)
+        time.sleep(DELAY)
+
+    results = googlenews.result()
+    df = pd.DataFrame(results, columns=['title', 'date', 'link'])
+    df['date'] = df['date'].apply(lambda x: dateparser.parse(x))
+    
+    # Clean the links
+    df['link'] = df['link'].apply(lambda x: x.split('&ved=')[0])
+
+    df = df[~df['link'].str.contains('|'.join(EXCLUDE_WEBSITES))]
+    df['Content'] = ''
+    df['Vader Sentiment'] = None
+    df["Keyword Count"] = ''
+    df['Link Contains Matrox']=''
+    sid = SentimentIntensityAnalyzer() 
+    for i, row in df.iterrows():
+        print(f'Scraping URL {row["link"]}\n')
+        try:
+            article_text = get_article_content(row['link'])
+            if article_text:
+                scores = sid.polarity_scores(article_text)
+                vader_sentiment = scores['compound']
+                df.at[i, 'Content'] = article_text       
+                df.at[i, 'Vader Sentiment'] = vader_sentiment*4    
+                df.at[i, 'Keyword Count'] = article_text.count(SEARCH_WORD)   
+                df.at[i, 'Link Contains Matrox'] = df.at[i,'link'].count("matrox")   
+        except requests.exceptions.RequestException as e:
+            print('URL has been skipped due to HTTP 404\n')
+            continue
+    df.dropna(subset=['Vader Sentiment'], inplace=True)     
+    print(df.shape)
+    
+    return df
+
+def main():
+    data = pd.DataFrame() 
+    today = datetime.now()
+    start_date = (today - timedelta(days=DAYS_TO_SCRAPE))
+    end_date = start_date + timedelta(days=SEARCH_PERIOD)
+    start_time = time.time()
+
+    while start_date < today:
+        df = data_scrape(start_date.strftime('%m/%d/%Y'), end_date.strftime('%m/%d/%Y'))
+        if data.empty:
+            data = df
+        else:
+            data = pd.concat([data, df], ignore_index=True)
+
+        elapsed_time = round(((time.time() - start_time) / 60), 2)
+        end_date += timedelta(days=SEARCH_PERIOD)
+        start_date += timedelta(days=SEARCH_PERIOD)
+        print("Scrap succesful. ", (today - start_date).days, f"days left to scrape\nELAPSED TIME:{elapsed_time}")
+
+
+    # Normalise data to run Sentiment Monthly
+    df = df.rename(columns={'date': 'published date', 'link': 'url', 'Content':'text_content', 'Vader Sentiment':'Sentiment (Manual)'})
+    df = df.drop_duplicates(subset='url', keep='first')
+    df = df.drop(['Keyword Count','Link Contains Matrox','text_content'], axis=1)
+    df.to_csv(FILENAME, index=False)
+    #df.drop(['Keyword Count','Link Contains Matrox'])
+    return df 
+
+main()
+
+
+
